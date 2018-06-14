@@ -1,0 +1,135 @@
+# Library for pretty-printing code.
+# Copyright (C) 2018 Pieter Hijma
+
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+#+property: header-args :comments link :tangle-mode (identity #o400) :results output silent :mkdirp yes
+
+#+title: Emitting code
+
+ # tangling
+#+begin_src emacs-lisp :exports none :results output silent
+(async-start
+ (lambda ()
+   (require 'org)
+   (require 'ob)
+   (require 'ob-tangle)
+   (let ((files '("main.org" "system.org" "code-emitter.org")))
+     (mapc (lambda (file)
+	     (find-file file)
+	     (let ((result (org-babel-tangle)))
+	       (kill-buffer)
+	       result))
+	   files)))
+ (lambda (result)
+   (message "Done with tangling %s." (mapconcat 'identity result " "))))
+(princ "Busy with tangling")
+#+end_src
+
+
+ # exporting
+#+begin_src emacs-lisp :exports none :results output silent
+(defun export ()
+  (require 'package)
+  (package-initialize)
+  (require 'org)
+  (require 'ob)
+  (require 'htmlize)
+  (find-file "main.org")
+  (org-html-export-as-html)
+  (unless (file-exists-p "html/main.html")
+    (mkdir "html"))
+  (write-file "html/main.html")
+  (kill-buffer))
+
+(defun msg-me (process event)
+  (when (equal event "finished\n")
+    (message "Exporting to HTML done")
+    (kill-buffer "*html-export*")))
+
+(progn
+  (set-process-sentinel
+   (start-process-shell-command
+    "html-export" "*html-export*"
+    (format "TERM=xterm-256color;emacs -Q -nw --eval '(progn (funcall %S) (kill-emacs))';exit"
+            (symbol-function 'export))) 'msg-me)
+  (princ "Busy exporting to HTML"))
+#+end_src
+
+ # clean
+#+begin_src sh :exports none :results output silent :shebang #!/bin/sh
+/bin/rm -rf html
+/bin/rm -rf system
+#+end_src
+
+* Introduction
+
+This package contains functionality to pretty-print code.  It is licensed under
+GPL version 3, see Sec. [[copying]].
+
+* External interface
+
+The code emitter exports two functions: ~emit~ and ~emit-list~.  The ~emit~
+function takes as input several strings that may have ~~a~ parameters.  Each
+~~a~ paramater in the string should have a corresponding parameter.  An
+example is:
+
+#+begin_src lisp
+(emit "void ~a(~a) {" funcname parameter
+      "    ~a" statements
+      "}")
+#+end_src
+
+All statements in ~statements~ will be indented properly.
+
+The following example shows how the ~emit-list~ function should be used:
+
+#+begin_src lisp
+(emit-list some-list)
+(emit-list some-list :nr-lines 2)
+(emit-list some-list :separator ", ")
+#+end_src
+
+The first function emits each element of list ~some-list~ on a separate line,
+indented as the indentation should be.  The second example, does the same but
+leaves a blank line in between.  The third example emits a list without
+newlines but with the separator ", " in between.
+
+In case something is wrong, it is necessary to reset the code-emitter:
+
+#+begin_src lisp
+(reset-code-emitter)
+#+end_src
+
+
+# #+include: "system.org" :minlevel 1
+#+include: "code-emitter.org" :minlevel 1
+
+* Copying <<copying>>
+
+Library for pretty-printing code.
+Copyright (C) 2018 Pieter Hijma
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see [[https://www.gnu.org/licenses/]].

@@ -1,0 +1,826 @@
+#+name: license-preamble
+#+begin_src lisp :exports none 
+;;;; Library for pretty-printing code.
+;;;; Copyright (C) 2018 Pieter Hijma
+
+;;;; This program is free software: you can redistribute it and/or modify
+;;;; it under the terms of the GNU General Public License as published by
+;;;; the Free Software Foundation, either version 3 of the License, or
+;;;; (at your option) any later version.
+
+;;;; This program is distributed in the hope that it will be useful,
+;;;; but WITHOUT ANY WARRANTY; without even the implied warranty of
+;;;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;;;; GNU General Public License for more details.
+
+;;;; You should have received a copy of the GNU General Public License
+;;;; along with this program.  If not, see <https://www.gnu.org/licenses/>.
+#+end_src
+
+#+property: header-args :comments link :tangle-mode (identity #o400) :results output silent :mkdirp yes
+
+* The ~emit~ macro
+  :PROPERTIES:
+  :header-args+: :package ":code-emitter"
+  :header-args+: :tangle "system/code-emitter.lisp"
+  :END:
+
+Typical input for the ~emit~ macro is:
+
+#+begin_src lisp :tangle no
+(emit "void ~a(~a) {" (f) (args) " ~a" (code))
+#+end_src
+
+Functions such as ~f~, ~args~, and ~code~ can also contain ~emit~ statements.
+Since the output can only be fully generated when all ~emit~ statements have
+been executed, the last executing ~emit~ call (which is also the first being
+called), should be responsible for creating the final output, joining all the
+lines together.  This means that ~emit~ has to be a macro to control the flow
+of execution.  The first ~emit~ call has to be registered as the ~emit~
+responsible for joining, after which all emits can happen in function call
+order.  This happens by registering ~responsible-for-join~ locally and by
+calling ~(list ,@forms)~, which ensures that all other emits are executed in
+function call order.
+
+#+begin_src lisp :noweb yes :exports none
+<<license-preamble>>
+
+(in-package :code-emitter)
+
+(declaim (optimize (speed 0) (space 1) (compilation-speed 0) (debug 3)))
+,#+sbcl (sb-ext:restrict-compiler-policy 'debug 3)
+#+end_src
+
+#+begin_src lisp
+(defmacro emit (&rest forms)
+  (with-gensyms (responsible-for-join result)
+    (let ((forms (split-lines-with-spec forms)))
+      (dolist (i forms) (check-form-statically i))
+      `(let ((,responsible-for-join (toggle-responsible-for-join))
+	     (,result (process-forms (list ,@forms))))
+	 (create-emit-output ,responsible-for-join ,result)))))
+#+end_src
+
+Registering as first ~emit~ happens by means of the following code:
+
+
+#+begin_src lisp
+(defparameter *responsible-for-join* t)
+
+(defun toggle-responsible-for-join ()
+  (cond (*responsible-for-join*
+	 (setf *responsible-for-join* nil)
+	 t)
+	(t
+	 nil)))
+#+end_src 
+
+If code fails, it is possible to reset the code-emitter with the following
+function:
+
+#+begin_src lisp
+(defun reset-code-emitter ()
+  (setf *responsible-for-join* t))
+#+end_src
+
+In the ~emit~ macro we want to treat each line separately, but the macro
+contains a list of more than one string with its spec (for example "void ~a")
+with each its arguments.  The following function splits these specifications by
+making a list that starts with the symbol ~list~ for each line:
+
+#+begin_src lisp
+(eval-when (:compile-toplevel :load-toplevel)
+  (defun split-lines-with-spec (l)
+    (let ((result nil))
+      (dolist (i l)
+	(cond ((typep i 'string)
+	       (when (not (null result))
+		 (setf (first result) (nreverse (first result))))
+	       (push (list 'list) result)
+	       (push i (first result)))
+	      (t
+	       (push i (first result)))))
+      (setf (first result) (nreverse (first result)))
+      (nreverse result))))
+#+end_src
+
+It walks over the list ~l~ and for each string it, pushes the symbol ~list~
+into ~result~ and onto this list, it pushes the string.  For each other element
+it pushes it to the list as well until the iterator becomes a string.  If the
+list is not empty, it reverses the first element and starts over.  This also
+has to be done after each element in ~l~ is processed.  Finally, the list is
+reversed.
+
+The resulting list has elements that we call a ~form~.  The following functions
+check whether such a form is correct by verifying whether the number of ~~a~'s
+is the same as the number of parameters or alternatively, whether the number of
+~~a~'s is twice the number of parameters.  In the latter case, the
+specification contains line-break information.
+
+
+#+begin_src lisp
+(eval-when (:compile-toplevel :load-toplevel)
+  (defun check-form-statically (form)
+    (let ((form (rest form)))
+      (cond ((regular-form-p form)
+	     nil)
+	    ((break-line-form-p form)
+	     (check-break-line-form form))
+	    (t
+	     (error "unmatched number of parameters for form ~s"
+		    (first form)))))))
+#+end_src
+
+It is possible to have regular forms and break-line forms.  The latter are
+forms with an extra function that specifies how the contents of a ~~a~ can be
+broken up.  The forms can be distinguished with:
+
+#+begin_src lisp
+(eval-when (:compile-toplevel :load-toplevel)
+  (defun regular-form-p (form)
+    (multiple-value-bind (nr-replacements nr-items)
+	(get-replacements-and-items form)
+      (equal nr-replacements nr-items)))
+
+  (defun break-line-form-p (form)
+    (multiple-value-bind (nr-replacements nr-items)
+	(get-replacements-and-items form)
+      (equal (* nr-replacements 2) nr-items))))
+#+end_src
+
+Checking a break-line form happens as specified below:
+
+#+begin_src lisp
+(eval-when (:compile-toplevel :load-toplevel)
+  (defun check-break-line-form (form)
+    (loop for (f . r) on (rest form) by #'cddr 
+       always (typep (first r) 'function))))
+#+end_src
+
+Retrieving the number of replacements and items:
+       
+#+begin_src lisp
+(eval-when (:compile-toplevel :load-toplevel)
+  (defun get-replacements-and-items (form)
+    (let ((nr-replacements (/ (length (all-matches "~a" (first form))) 2))
+	  (nr-items (1- (length form))))
+      (values nr-replacements nr-items))))
+#+end_src
+
+
+* Processing forms
+  :PROPERTIES:
+  :header-args+: :package ":code-emitter"
+  :header-args+: :tangle "system/code-emitter.lisp"
+  :END:
+
+Processing forms starts with making line-specs and processing them:
+
+#+begin_src lisp
+(defun process-forms (forms)
+  (process-line-specs (mapcar #'make-line-spec forms)))
+#+end_src
+
+A ~line-spec~ contains the format-string and the arguments: 
+
+#+begin_src lisp
+(defclass line-spec ()
+  ((format-string :initarg :format-string
+		  :initform (error "Must supply a format string.")
+		  :reader format-string)
+   (arguments :initarg :arguments
+	      :initform (error "Must supply arguments.")
+	      :reader arguments)))
+
+(defmethod print-object ((l line-spec) stream)
+  (print-unreadable-object (l stream :type t)
+    (format stream "~s, ~a" (format-string l) (arguments l))))
+#+end_src
+
+Making a line-spec from a form happens with the following function:
+
+#+begin_src lisp
+(defun make-line-spec (form)
+  (destructuring-bind (format &rest arguments) form
+    (cond ((regular-form-p form)
+	   (make-instance 'line-spec
+			  :format-string format
+			  :arguments (mapcar #'make-segment arguments)))
+	  ((break-line-form-p form)
+	   (make-instance 'line-spec
+			  :format-string format
+			  :arguments
+			  ;; (map-tuple arguments
+			  ;; 			#'make-break-line-segment
+			  ;; 			#'cddr)
+			  (loop for (arg1 arg2) on arguments by #'cddr
+			     collect (make-break-line-segment arg1 arg2))))
+	  (t
+	   (error "Unkown form: ~s." form)))))
+#+end_src
+
+This makes clear that there are two types of segments: a regular segment and
+a segment that contains additional information on how to break a line.
+
+#+begin_src lisp
+(defclass segment ()
+  ((value :initarg :value
+	  :initform (error "Must supply a value.")
+	  :reader value)))
+
+(defclass break-line-segment (segment)
+  ((break-line-func :initarg :break-line-func
+		    :initform (error "Must supply a break-line specification.")
+		    :reader break-line-func)))
+#+end_src
+
+Its helper functions:
+
+#+begin_src lisp
+(defun make-segment (value)
+  (make-instance 'segment :value value))
+
+(defmethod print-object ((s segment) stream)
+  (print-unreadable-object (s stream :type t)
+    (format stream "~s" (value s))))
+ 
+(defun make-break-line-segment (value break-line-func)
+  (make-instance 'break-line-segment :value value
+		 :break-line-func break-line-func))
+
+(defmethod print-object ((s break-line-segment) stream)
+  (print-unreadable-object (s stream :type t)
+    (format stream "~s, ~a" (value s) (break-line-func s))))
+#+end_src
+
+* Processing line-specs
+  :PROPERTIES:
+  :header-args+: :package ":code-emitter"
+  :header-args+: :tangle "system/code-emitter.lisp"
+  :END:
+
+Processing a line-spec is done with the function below.  It is highly possible
+that processing one line-spec results in more lines, therefore, the result of
+~process-line-spec~ is a list.  If only one line is the result, then the line
+is returned instead.
+
+
+#+begin_src lisp
+(defun process-line-specs (line-specs)
+  (assert (list-of-type line-specs 'line-spec))
+  (let ((flattened (flatten (mapcar #'process-line-spec line-specs))))
+    (let ((result (if (eql 1 (length flattened))
+		      (first flattened)
+		      flattened)))
+      (assert (or (typep result 'line) (list-of-type result 'line)))
+      result)))
+#+end_src
+
+Processing a line-spec happens as specified below.  First, the format string is
+split into a list with format specifiers, possibly containing information about
+the indentation that we retrieve from the first element of the list of format
+specifiers.  Each format specifier will become an ~segment~ in a ~line~.  The
+indentation needs to be removed from the format-string list elements.
+
+#+begin_src lisp
+(defun process-line-spec (line-spec)
+  (let* ((format (split-format (format-string line-spec)))
+	 (indentation (find-indentation (first format)))
+	 (line (make-line indentation
+			  (make-segments (remove-indentation format)
+					 (arguments line-spec)))))
+    (make-lines line)))
+
+(defun split-format (format-string)
+  (if (string= "" format-string) 
+      (list "")
+      (split "(~a)" format-string :with-registers-p t)))
+#+end_src
+
+Finding the indentation:
+
+#+begin_src lisp
+(defun find-indentation (string)
+  (nth-value 1 (scan "^ *" string)))
+#+end_src
+
+Removing the indentation (the spaces) from the format-list:
+
+#+begin_src lisp
+(defun remove-indentation (format)
+  (let ((indent-removed (string-left-trim " "(first format))))
+    (if (eql 0 (length indent-removed))
+	(if (null (rest format)) (list "") (rest format))
+	(cons indent-removed (rest format)))))
+#+end_src
+
+With the indentation information and the segments, we create a ~line~:
+
+#+begin_src lisp
+(defclass line ()
+  ((indentation :initarg :indentation
+		:initform (error "Must supply an indentation.")
+		:accessor indentation)
+   (segments :initarg :segments
+	     :initform (error "Must supply arguments.")
+	     :accessor segments)))
+
+(defmethod print-object ((l line) stream)
+  (print-unreadable-object (l stream :type t)
+    (format stream "~a, ~a" (indentation l) (segments l))))
+
+(defun make-line (indentation segments)
+  (make-instance 'line :indentation indentation :segments segments))
+#+end_src
+
+To make a line, the arguments from a ~line-spec~ have to be transformed into
+segments for a line.  If the format string contains a substring that is not a
+~~a~, this becomes a segment as well.  This happens in the following
+function that has as input a list of format specifiers, possibly a string
+without any ~~a~'s in it, and the arguments from the line-spec:
+
+#+begin_src lisp
+(defun make-segments (format-list arguments)
+  (if (null format-list)
+      nil
+      (if (string= "~a" (first format-list))
+	  (cons (first arguments)
+		(make-segments (rest format-list) (rest arguments)))
+	  (cons (make-segment (first format-list))
+		(make-segments (rest format-list) arguments)))))
+#+end_src
+
+Finally, it is possible that segments within a line contain lists of lines,
+resulting from nested ~emit~ calls.  The following function flattens this into
+several lines, remembering the indentation:
+
+#+begin_src lisp
+(defun make-lines (line)
+  (let ((lines nil)
+	(segments nil)
+	(indentation (indentation line)))
+    (dolist (segment (segments line))
+      (typecase (value segment)
+	(cons (progn
+		(let ((first (first (value segment)))
+		      (rest (rest (value segment))))
+		  (when (eql (indentation first) 0)
+		    (dolist (a (segments first)) (push a segments)))
+		  (when segments
+		    (push (make-line indentation (nreverse segments)) lines)
+		    (setf segments nil))
+		  (when (not (eql (indentation first) 0))
+		    (incf (indentation first) indentation)
+		    (push first lines))
+		  (dolist (line2 rest)
+		    (incf (indentation line2) indentation)
+		    (push line2 lines)))))
+	(line (if (eql (indentation (value segment)) 0)
+		  (dolist (a (segments (value segment))) (push a segments))
+		  (progn
+		    (when segments
+		      (push (make-line indentation (nreverse segments)) lines)
+		      (setf segments nil))
+		    (incf (indentation (value segment)) indentation)
+		    (push (value segment) lines))))
+	(otherwise (push segment segments))))
+    (when segments
+      (push (make-line indentation (nreverse segments)) lines))
+    (let ((result (nreverse lines)))
+      (if (eql (length result) 1)
+	  (first result)
+	  result))))
+#+end_src
+
+This function keeps track of the lines, the current segments of a line, and
+the indentation.  Initially, we start with a line with the same indentation of
+the input line, then for each segment, if it is list, it means that the
+segment contains lines, which means that we add the current segments to the
+current line, reset the segments, push the lines in the segments on the stack
+of lines, and create a new line for any additional segments.  
+
+In the other case, the segment is just a segment that belongs to this line.
+Finally, we just return a line, if it turns out to be just one line.
+
+* Creating the output
+  :PROPERTIES:
+  :header-args+: :package ":code-emitter"
+  :header-args+: :tangle "system/code-emitter.lisp"
+  :END:
+
+Creating emit output has two modes: if it is the emit that is responsible for
+the join, it will create the final output, otherwise, it will just return the
+lines. 
+
+#+begin_src lisp
+(defun create-emit-output (responsible-for-join result)
+  (if responsible-for-join
+      (progn
+	(setf *responsible-for-join* t)
+	(create-final-output result))
+      result))
+#+end_src
+
+Creating the final output is just creating output for each ~line~.  Since we
+have now all lines available, we can break the lines up with the information
+provided, discussed in the next section.
+
+#+begin_src lisp
+(defun create-final-output (lines)
+  (let ((lines (break-lines (ensure-list lines))))
+    (format nil "~{~a~^~%~}" (mapcar #'create-output-line lines))))
+#+end_src
+
+Creating the output for a line:
+
+#+begin_src lisp
+(defun create-output-line (line)
+  (with-slots (indentation segments) line
+    (if (eql 0 indentation)
+	(format nil "~{~a~}" (mapcar #'get-value segments))
+	(format nil "~vt~{~a~}" indentation (mapcar #'get-value segments)))))
+
+(defun get-value (segment)
+  (let ((value (value segment)))
+    (if value value "")))
+#+end_src
+
+* Breaking the lines
+  :PROPERTIES:
+  :header-args+: :package ":code-emitter"
+  :header-args+: :tangle "system/code-emitter.lisp"
+  :END:
+
+To break the lines, we need to define the default indentation and the maximum
+number of columns.  We then recursively break each line up.
+      
+#+begin_src lisp
+(defparameter *default-indentation* 2)
+(defparameter *max-columns* 80)
+
+(defun break-lines (lines)
+  lines)
+  ;; (if (null lines) 
+  ;;     nil
+  ;;     (multiple-value-bind (line-one line-two) (break-line (first lines))
+  ;; 	(cons line-one (if (null line-two)
+  ;; 			   (break-lines (rest lines))
+  ;; 			 (cons line-two (rest lines))))))
+  
+#+end_src
+
+To break a line, we split the segments as soon as it exceeds the number of
+columns.  If the result is indeed split into two lists, we try to break up the
+segments for a line.
+
+#+begin_src lisp
+(defun break-line (line)
+  (with-slots (indentation segments) line
+    (multiple-value-bind (segs-line1 segs-line2)
+	(split-list-on-first segments #'(lambda (s)
+				  (exceeds-column-width s line)))
+      (if segs-line2
+	  (break-segments-line
+	   (cons  (first segs-line2) (reverse segs-line1)) (rest segs-line2)
+			       line)
+	  (values line nil)))))
+#+end_src
+
+Exceeding the column width means that the length of the current segment plus
+the length up to that segment is larger than the maximum number of columns.
+
+#+begin_src lisp
+(defun exceeds-column-width (segment line)
+  (> (+ (length (value segment)) (length-line-up-to-segment line segment))
+     *max-columns*))
+#+end_src
+
+Computing the length of a line up to a certain segment in the line is done as
+follows:
+
+#+begin_src lisp
+(defun length-line-up-to-segment (line segment)
+  (with-slots (indentation segments) line
+    (let ((current-length indentation))
+      (dolist (a (segments line))
+	(when (eql a segment)
+	  (return-from length-line-up-to-segment current-length))
+	(incf current-length (length (value a))))
+      (error "segment ~a not in line ~a" segment line))))
+#+end_src
+
+Breaking the segments of a line will return either a tuple of a line and nil
+or a tuple of two lines.  The latter line will have twice the default
+indentation of first line.  The segments of the first line are reversed as
+this is easier to process.  The reason is that we want to start at the last
+segment, check whether that segment is breakable and than move back until we
+find a breakable segment.  This happens in the recursive function
+~break-segments-line2~. 
+
+#+begin_src lisp
+(defun break-segments-line (break-segs-rev segs-line2 line)
+  (multiple-value-bind (segs1 segs2)
+      (break-segments-line2 break-segs-rev segs-line2 line)
+    (if segs1
+	(with-slots (indentation) line
+	  (values (make-line indentation segs1)
+		  (make-line (+ indentation (* 2 *default-indentation*))
+			     segs2)))
+	(values line nil))))
+#+end_src
+
+This is a recursive function.  If we reached the end of the list, we return
+~nil~, otherwise we focus on the segment to break, which is the first one of
+the ~break-segs-rev~.  If ~break-seg~ succeeds we return the two new lists of
+segments, otherwise we continue with the rest, and return a list of segments
+with the unsuccesfully broken ~seg-to-break~ also added in the mix.
+
+#+begin_src lisp
+(defun break-segments-line2 (break-segs-rev segs-line2 line)
+  (if (null break-segs-rev)
+      (values nil nil)
+      (let ((seg-to-break (first break-segs-rev))
+	    (rest (rest break-segs-rev)))
+	(multiple-value-bind (seg1 seg2)
+	    (break-seg seg-to-break line)
+	  (if seg1
+	      (values (reverse (cons seg1 rest))
+		      (cons seg2 segs-line2))
+	      (multiple-value-bind (segs1 segs2)
+		  (break-segments-line2 rest segs-line2 line)
+		(values (cons seg-to-break segs1)
+			segs2)))))))
+#+end_src
+	      
+Breaking an segment can only be done with a ~break-line-segment~:      
+
+#+begin_src lisp
+(defgeneric break-seg (segment line)
+  (:documentation "Break an segment in a line."))
+#+end_src
+
+#+begin_src lisp
+(defmethod break-seg ((segment segment) line)
+  nil)
+#+end_src
+
+For a ~break-line-segment~ we loop over all separators that are defined in the
+~break-line-func~ and try to break the segment with the separator.
+
+#+begin_src lisp
+(defmethod break-seg ((segment break-line-segment) line)
+  (loop for separator in (funcall (break-line-func segment))
+       do (multiple-value-bind (seg1 seg2)
+	      (break-seg-with-separator segment separator line)
+	    (when seg1
+	      (return-from break-seg (values seg1 seg2)))))
+  nil)
+#+end_src
+
+In the following function we try to split the list of items within the string
+as late as possible and return two new break-line-segments or nil.  The new
+break-line-segments contain the string-items again, but joined together.
+
+#+begin_src lisp
+(defun break-seg-with-separator (segment separator line)
+  (with-slots (value break-line-func) segment
+    (let ((current-length (length-line-up-to-segment line segment))
+	   (items (split separator value)))
+      (multiple-value-bind (items1 items2)
+	  (split-list-on-first items #'(lambda (x)
+				(incf current-length (+ (length separator)
+							(length x)))
+				(> current-length *max-columns*)))
+	(if items2
+	    (values
+	     (make-break-line-segment (join items1 :separator separator) break-line-func)
+	     (make-break-line-segment (join items2 :separator separator) break-line-func))
+	    nil)))))
+#+end_src
+
+* The ~emit-list~ function
+  :PROPERTIES:
+  :header-args+: :package ":code-emitter"
+  :header-args+: :tangle "system/code-emitter.lisp"
+  :END:
+
+The following code defines the ~emit-list~ function:
+
+#+begin_src lisp
+(defun emit-list (l &key separator (nr-lines 1 supplied-p)
+		      (function #'identity))
+  (let ((responsible-for-join (toggle-responsible-for-join))
+	(result (create-list-result l separator nr-lines supplied-p function)))
+    (create-emit-output responsible-for-join result)))
+#+end_src
+
+It needs to check whether it is responsible for joining and then calls:
+
+#+begin_src lisp
+(defun create-list-result (l separator nr-lines supplied-p function)
+  (cond ((and separator supplied-p)
+	 (error "cannot supply both a separator and nr-lines"))
+	(separator
+	 (make-lines
+	  (make-line 0 (create-separator-segments l separator function))))
+	(t
+	   (loop for i in l
+	      appending (ensure-list (make-lines (make-line 0 (list (make-segment
+						    (funcall function i))))))
+	      appending (make-empty-lines nr-lines)))))
+#+end_src
+
+#+begin_src lisp
+(defun create-separator-segments (l separator function)
+  (cons (make-segment (funcall function (first l)))
+	(loop for i in (rest l)
+	     appending (ensure-list (make-segment separator))
+	     appending (ensure-list (make-segment (funcall function i))))))
+#+end_src
+
+This function creates a format string for the situation where a separator was
+defined.  It applies function ~function~ to each segment.  If lines were
+requested, we create empty lines:
+
+#+begin_src lisp
+(defun make-empty-lines (nr-lines)
+  (loop for i below (1- nr-lines) appending
+       (ensure-list (make-line 0 (list (make-segment ""))))))
+#+end_src
+
+
+
+The function ~check-item~ applies function f and checks whether the item is a
+string:
+
+#+begin_src lisp
+(defun check-item (i function)
+  (let ((result (funcall function i)))
+    (typecase result
+      (string
+       result)
+      (otherwise
+       (error "expecting a string for ~a" result)))))
+#+end_src
+
+
+* Split lines
+  :PROPERTIES:
+  :header-args+: :package ":code-emitter"
+  :header-args+: :tangle "system/code-emitter.lisp"
+  :END:
+
+Sometimes it is useful to split lines to use other results from emit later on.
+
+#+begin_src lisp
+(defun split-lines (string)
+  (split-sequence #\newline string))
+#+end_src
+
+
+* Testing
+  :PROPERTIES:
+  :header-args+: :package ":test-code-emitter"
+  :header-args+: :tangle "system/test-code-emitter.lisp"
+  :END:
+
+#+begin_src lisp :exports none :noweb yes
+<<license-preamble>>
+
+(in-package :cl-user)
+
+(defpackage :test-code-emitter
+  (:use :cl :fiveam :code-emitter)
+  (:export :test-code-emitter))
+
+(in-package :test-code-emitter)
+
+(declaim (optimize (speed 0) (space 1) (compilation-speed 0) (debug 3)))
+,#+sbcl (sb-ext:restrict-compiler-policy 'debug 3)
+
+(def-suite code-emitter)
+(in-suite code-emitter)
+#+end_src
+
+To test the functionality, we first have to set up some variables with values
+to use in the tests:
+
+#+begin_src lisp
+(defparameter *void* "void")
+(defparameter *f* "f")
+(defparameter *g* "g")
+(defparameter *a* "A")
+
+#+end_src
+
+With the test we want to recreate the following inputs:
+
+#+begin_src lisp
+
+(defparameter *input*
+"class A {
+
+    void f(int a, int b) {
+        int a = 2;
+        int c = 3;
+        return 5;
+    }
+    
+    void g(int a, int b) {
+        int c = 3;
+        int d = 4;
+    }
+    
+}")
+
+(defparameter *input-funcs*
+"void f(int a, int b) {
+    int a = 2;
+    int c = 3;
+    return 5;
+}
+
+void g(int a, int b) {
+    int c = 3;
+    int d = 4;
+}
+")
+#+end_src 
+
+
+We define the following tests:
+
+#+begin_src lisp
+(test emit-nil
+  (is (equal "" (emit "~a" nil))))
+
+(test emit-void
+  (is
+   (equal "void" (emit "~a" *void*))))
+
+(test emit-class
+  (is
+    (equal *input* (pp))))
+
+(test emit-list
+  (is
+   (equal *input-funcs* (funcs))))
+
+#+end_src
+
+The first test is a simple test.  The second tests the ~emit-list~
+functionality.  The third test ~test-class~ tests the creation of a class and
+tests most of the functionality of this library.
+
+For the first test we need the function ~pp~ and many others:
+
+#+begin_src lisp
+(defun expr ()
+  "2")
+
+(defun stat ()
+  (emit "int a = ~a;" (expr)))
+
+(defun stats ()
+  (emit-list (list (stat) "int c = 3;" "return 5;")))
+
+(defun stats2 ()
+  (emit-list (list "int c = 3;" "int d = 4;")))
+
+(defun var () 
+  "a")
+
+(defun param ()
+  (emit "int ~a" (var)))
+
+(defun params ()
+  (emit-list (list (param) "int b") :separator ", "))
+
+(defun bl ()
+  (emit "{"
+	"    ~a" (stats)
+	"}"))
+
+(defun func ()
+  (emit "~a ~a(~a) ~a" *void* *f* (params) (bl)))
+
+
+(defun func2 ()
+  (emit "~a ~a(~a) {" *void* *g* (params)
+	"    ~a" (stats2)
+	"}"))
+
+(defun funcs ()
+  (emit-list (list (func) (func2)) :nr-lines 2))
+
+(defun pp ()
+  (emit "class ~a {" *a*
+	""
+	"    ~a" (funcs)
+	"}"))
+
+(defun test-code-emitter ()
+  (run! 'code-emitter))
+#+end_src
+
+

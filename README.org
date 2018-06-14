@@ -1,0 +1,46 @@
+#+title: Emitting code
+
+* Introduction
+
+This package contains functionality to pretty-print code.  The code emitter
+exports two functions: ~emit~ and ~emit-list~.  The ~emit~ function takes as
+input several strings that may have ~~a~ parameters.  Each ~~a~ paramater in
+the string should have a corresponding parameter.  An example is:
+
+#+begin_src lisp
+(emit "void ~a(~a) {" funcname parameter
+      "    ~a" statements
+      "}")
+#+end_src
+
+All statements in ~statements~ will be indented properly.
+
+The following example shows how the ~emit-list~ function should be used:
+
+#+begin_src lisp
+(emit-list some-list)
+(emit-list some-list :nr-lines 2)
+(emit-list some-list :separator ", ")
+#+end_src
+
+The first function emits each element of list ~some-list~ on a separate line,
+indented as the indentation should be.  The second example, does the same but
+leaves a blank line in between.  The third example emits a list without
+newlines but with the separator ", " in between.
+
+In case something is wrong, it is necessary to reset the code-emitter:
+
+#+begin_src lisp
+(reset-code-emitter)
+#+end_src
+
+The source code has been provided as [[https://orgmode.org][Org-mode]] files that also exports
+documentation. 
+
+* License
+
+The software is licensed under GPL version 3. 
+
+* Copyright
+
+Pieter Hijma 2018
