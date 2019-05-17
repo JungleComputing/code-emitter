@@ -617,9 +617,22 @@ The following code defines the ~emit-list~ function:
 It needs to check whether it is responsible for joining and then calls:
 
 #+begin_src lisp
-(defun create-list-result (l separator nr-lines supplied-p function)
-  (cond ((and separator supplied-p)
-	 (error "cannot supply both a separator and nr-lines"))
+(defun create-separator-lines (l separator nr-lines function)
+  (loop for elt in l for i below (length l) 
+     appending 
+       (ensure-list (make-lines (make-line 0 (cons (make-segment (funcall function elt))
+						   (if (< i (1- (length l)))
+						       (list (make-segment separator))
+						       nil)))))
+     appending (make-empty-lines nr-lines)))
+
+(defun create-list-result (l separator
+			   nr-lines nr-lines-supplied-p
+			   function)
+  (cond ((and separator nr-lines-supplied-p)
+	 (if (> nr-lines 0)
+	     (create-separator-lines l separator nr-lines function)
+	     (error "Need to specify a number of lines greater than 0")))
 	(separator
 	 (make-lines
 	  (make-line 0 (create-separator-segments l separator function))))
@@ -745,6 +758,15 @@ void g(int a, int b) {
     int d = 4;
 }
 ")
+
+(defparameter *input-separator/lines*
+"void g(int a,
+int b
+) {
+    int c = 3;
+    int d = 4;
+}")
+     
 #+end_src 
 
 
@@ -766,6 +788,9 @@ We define the following tests:
   (is
    (equal *input-funcs* (funcs))))
 
+(test emit-separator/line-list
+  (is
+   (equal *input-separator/lines* (func2-separator/lines))))
 #+end_src
 
 The first test is a simple test.  The second tests the ~emit-list~
@@ -796,6 +821,9 @@ For the first test we need the function ~pp~ and many others:
 (defun params ()
   (emit-list (list (param) "int b") :separator ", "))
 
+(defun params-separator/lines ()
+  (emit-list (list (param) "int b") :separator "," :nr-lines 1))
+
 (defun bl ()
   (emit "{"
 	"    ~a" (stats)
@@ -807,6 +835,11 @@ For the first test we need the function ~pp~ and many others:
 
 (defun func2 ()
   (emit "~a ~a(~a) {" *void* *g* (params)
+	"    ~a" (stats2)
+	"}"))
+
+(defun func2-separator/lines ()
+  (emit "~a ~a(~a) {" *void* *g* (params-separator/lines)
 	"    ~a" (stats2)
 	"}"))
 
